@@ -1,0 +1,16 @@
+# 编译中间产物
+*.o
+*.d
+*.out
+a.out
+
+# 编译生成的可执行文件
+server
+client
+build/
+
+# IDE 和系统文件
+.vscode/
+.idea/
+.DS_Store
+*.swp
