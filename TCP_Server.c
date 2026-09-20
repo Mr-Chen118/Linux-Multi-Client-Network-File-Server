@@ -10,11 +10,91 @@
 #include<arpa/inet.h> 
 #include"common.h"
 
+int sockfd_arr[MAX_CLIENT];
+int online_count=0;
+pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZER;
+
+
+void *handle_client(void *arg);
+int sign_in_client(void *arg);
+void *remove_client(void *arg);
+
+int sign_in_client(void *arg){
+    pthread_mutex_lock(&mutex);
+    int client_fd = *(int*)arg;
+    free(arg);
+    if(online_count>=MAX_CLIENT){
+        printf("服务器已满，客户端%d注册失败\n",client_fd);
+        close(client_fd);
+        pthread_mutex_unlock(&mutex);
+        return -1;
+    }
+    for(int i=0;i<MAX_CLIENT;i++){
+        if(sockfd_arr[i]<=0){
+            sockfd_arr[i]=client_fd;
+            online_count++;
+            int *t_id=malloc(sizeof(int));
+            *t_id=client_fd;
+            pthread_t tid;
+            if(pthread_create(&tid,NULL,handle_client,(void*)t_id)){
+                perror("pthread_create");
+                close(client_fd);
+                sockfd_arr[i]=0;
+                online_count--;
+                pthread_mutex_unlock(&mutex);
+                return -1;
+            }
+            pthread_detach(tid);
+            pthread_mutex_unlock(&mutex);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&mutex);
+    return -1;
+}
+void *remove_client(void *arg){
+    pthread_mutex_lock(&mutex);
+    int client_fd = *(int*)arg;
+    free(arg);
+    for(int i=0;i<MAX_CLIENT;i++){
+        if(sockfd_arr[i]==client_fd){
+            sockfd_arr[i]=0;
+            online_count--;
+            break;
+        }
+    } 
+    pthread_mutex_unlock(&mutex);
+    printf("客户端%d已关闭连接\n",client_fd);
+    return NULL;
+}
+
+void *send_broadcast(int client_id,char *msg){
+    pthread_mutex_lock(&mutex);
+    int len = strlen(msg);
+    for(int i=0;i<MAX_CLIENT;i++){
+        if(sockfd_arr[i]>0 ){
+            int total=0;
+            while(total<len){
+                int ret=send(sockfd_arr[i],msg+total,len-total,0);
+                if(ret<=0){
+                    perror("send");
+                    shutdown(sockfd_arr[i],SHUT_RDWR);
+                    break;
+                }
+                total+=ret;
+            }
+        }
+    }
+    pthread_mutex_unlock(&mutex);
+    return NULL;
+}
+
 void *handle_client(void *arg){
     int client_fd = *(int*)arg;
+    free(arg);
     char *read_buf=NULL;
     char *write_buf=NULL;
-    ssize_t count=0,send_count=0;
+    ssize_t count=0;
     read_buf = malloc(sizeof(char)*BUF_SIZE);
     write_buf = malloc(sizeof(char)*BUF_SIZE);
     if(!read_buf){
@@ -24,38 +104,35 @@ void *handle_client(void *arg){
     }
     if(!write_buf){
         perror("malloc write_buf");
-        close(client_fd);
+        free(read_buf);
         return NULL;
     }
     while(1){
-        count = recv(client_fd,read_buf,BUF_SIZE,0);
+        count = recv(client_fd,read_buf,BUF_SIZE-1,0);
+        if(count==0){
+            printf("客户端%d已关闭连接\n",client_fd);
+            break;
+        }
         if(count<0){
             perror("recv");
-        }else if(count==0){
-            printf("客户端%d已关闭连接\n",client_fd);
+            int *p_fd = malloc(sizeof(int));
+            *p_fd = client_fd;
+            remove_client(p_fd);
+            close(client_fd);
+            free(read_buf);
+            free(write_buf);
             break;
         }
         read_buf[count]='\0';
         printf("客户端%d:%s\n",client_fd,read_buf);
 
-        strcpy(write_buf,"服务器已收到\n");
-        int total=0 , len = strlen(write_buf);
-        while(total<len){
-            send_count = send(client_fd,write_buf+total,len-total,0);
-            if(send_count<0){
-            perror("send");
-            break;
-            }
-            total+=send_count;
-        }
+        snprintf(write_buf,BUF_SIZE,"客户端%d:%s",client_fd,read_buf);
+        send_broadcast(client_fd,write_buf);
     }
-    close(client_fd);
-    free(read_buf);
-    free(write_buf);
     return NULL;
 }
 
-int main(int argc, char const *argv[])
+int main(void)
 {
     int sockfd = socket(AF_INET,SOCK_STREAM,0);
     if(sockfd<0){
@@ -76,31 +153,29 @@ int main(int argc, char const *argv[])
     if(listen(sockfd,100)){
         perror("listen");
         return EXIT_FAILURE;
-    }
 
+    }
     struct sockaddr_in client_addr;
     memset(&client_addr,0,sizeof(client_addr));
-    int client_addr_len = sizeof(client_addr);
+    socklen_t client_addr_len = sizeof(client_addr);
     while(1){
+        client_addr_len = sizeof(client_addr);
         int connfd = accept(sockfd,(struct sockaddr *)&client_addr,&client_addr_len);
         int *p=malloc(sizeof(int));
         *p=connfd;
-        pthread_t pid;
         if((*p)<0){
             perror("accept");
+            free(p);
             continue;
         }
-        printf("与客户端%s %d 建立连接%d\n",inet_ntoa(client_addr.sin_addr),ntohs(client_addr.sin_port),connfd);
-        if(pthread_create(&pid,NULL,handle_client,(void*)p)){
-            perror("pthread_create");
-            pid=-1;
-            close(connfd);
-            free(p);
+        if(sign_in_client(p)<0){
+            printf("客户端%d注册失败\n",connfd);
+        }else{
+            printf("与客户端%s %d 建立连接%d\n",inet_ntoa(client_addr.sin_addr),ntohs(client_addr.sin_port),connfd);
         }
-        pthread_detach(pid);
-        client_addr_len = sizeof(client_addr);
-    }
     
+    }
+    printf("服务器已关闭\n");
     printf("释放资源\n");
     close(sockfd);
 }
