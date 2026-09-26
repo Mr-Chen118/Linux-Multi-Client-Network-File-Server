@@ -9,6 +9,7 @@
 #include<sys/select.h>
 #include<arpa/inet.h> 
 #include"common.h"
+#include"net_io.h"
 
 int sockfd_arr[MAX_CLIENT];
 int online_count=0;
@@ -68,7 +69,7 @@ void *remove_client(void *arg){
     return NULL;
 }
 
-void *send_broadcast(int client_id,char *msg){
+void *send_broadcast(char *msg){
     pthread_mutex_lock(&mutex);
     int len = strlen(msg);
     for(int i=0;i<MAX_CLIENT;i++){
@@ -108,13 +109,12 @@ void *handle_client(void *arg){
         return NULL;
     }
     while(1){
-        count = recv(client_fd,read_buf,BUF_SIZE-1,0);
+        count = recv_line(client_fd,read_buf,BUF_SIZE);
         if(count==0){
-            printf("客户端%d已关闭连接\n",client_fd);
-            break;
+            continue;
         }
         if(count<0){
-            perror("recv");
+            printf("客户端%d读取失败\n",client_fd);
             int *p_fd = malloc(sizeof(int));
             *p_fd = client_fd;
             remove_client(p_fd);
@@ -123,11 +123,66 @@ void *handle_client(void *arg){
             free(write_buf);
             break;
         }
-        read_buf[count]='\0';
+        
+        char match[]="UPLOAD ";
+        if(strncmp(read_buf,match,strlen(match))==0){
+            char filename[256];
+            long long file_size;
+            int parsed = sscanf(read_buf,"UPLOAD %255s %lld",filename,&file_size);
+            if(parsed!=2){
+                printf("客户端%d上传命令格式错误\n",client_fd);
+                continue;
+            }
+            if(file_size<0){
+                printf("客户端%d上传命令文件大小不能为负数\n",client_fd);
+                continue;
+            }
+            if(strchr(filename,'/')!=NULL){
+                printf("客户端%d上传的文件名非法\n", client_fd);
+                continue;
+            }
+            char file_path[512];
+            int path_len = snprintf(file_path,sizeof(file_path),"server_files/%s",filename);
+            if(path_len<0 || (size_t)path_len>=sizeof(file_path)){
+                printf("客户端%d上传的文件名过长\n", client_fd);
+                continue;
+            }
+            FILE *fp = fopen(file_path,"wb");
+            if(!fp){
+                perror("fopen");
+                continue;
+            }
+            long long remaining=file_size;
+            int upload_ok=1;
+            while(remaining>0){
+                size_t chunk=remaining<BUF_SIZE?remaining:BUF_SIZE;
+                if(recv_all(client_fd,read_buf,chunk)!=0){
+                    printf("客户端%d接受文件失败\n",client_fd);
+                    upload_ok=0;
+                    break;
+                }
+                if(fwrite(read_buf,1,chunk,fp)!=chunk){
+                    printf("客户端%d写入文件失败\n",client_fd);
+                    upload_ok=0;
+                    break;
+                }
+                remaining-=chunk;
+            }
+            fclose(fp);
+            if(upload_ok&&remaining==0){
+                send_all(client_fd,"UPLOAD_OK\n",10);
+                printf("客户端%d上传文件完成 %s\n\n",client_fd,file_path);
+            }
+
+            printf("文件名: %s, 大小: %lld\n",filename,file_size);
+            continue;
+        }
+
+
         printf("客户端%d:%s\n",client_fd,read_buf);
 
-        snprintf(write_buf,BUF_SIZE,"客户端%d:%s",client_fd,read_buf);
-        send_broadcast(client_fd,write_buf);
+        snprintf(write_buf,BUF_SIZE,"客户端%d:%s\n",client_fd,read_buf);
+        send_broadcast(write_buf);
     }
     return NULL;
 }

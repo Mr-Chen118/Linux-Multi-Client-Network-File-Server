@@ -10,6 +10,8 @@
 #include<arpa/inet.h>
 #include<signal.h>
 #include"common.h"
+#include"net_io.h"
+#include<sys/stat.h>
 
 void *read_from_server(void *arg){
     int sockfd = *((int*)arg);
@@ -36,6 +38,72 @@ void *write_to_server(void *arg){
     int sockfd = *((int*)arg);
     char write_buf[BUF_SIZE];
     while(fgets(write_buf,sizeof(write_buf),stdin)!=NULL){
+        if(strncmp(write_buf,"/upload ",8)==0){
+            char file_path[256];
+            int parsed=sscanf(write_buf,"/upload %255s",file_path);
+            if(parsed!=1){
+                perror("sscanf");
+                continue;
+            }
+            struct stat st;
+            if(stat(file_path,&st)!=0){
+                perror("stat");
+                continue;
+            }
+            
+            if(!S_ISREG(st.st_mode)){ 
+                printf("不是普通文件\n");
+                continue;
+            }
+            char file_name[256];
+            memset(file_name,0,sizeof(file_name));
+            char *p=strrchr(file_path,'/');
+            if(p){
+                strcpy(file_name,p+1);
+            }else{
+                strcpy(file_name,file_path);
+            }
+            
+            FILE* fp = fopen(file_path,"rb");
+            if(fp==NULL){
+                perror("fopen");
+                continue;
+            }
+            char header[BUF_SIZE];
+            int header_len=snprintf(header,sizeof(header),"UPLOAD %s %lld\n",file_name,(long long)st.st_size);
+            if(header_len<0||(size_t)header_len>=sizeof(header)){
+                printf("上传的命令过长\n");
+                fclose(fp);
+                continue;
+            }
+            
+            if(send_all(sockfd,header,(size_t)header_len)!=0){
+                printf("发送上传命令失败\n");
+                fclose(fp);
+                break;
+            }
+            long long remaining=(long long)st.st_size;
+            char file_buf[BUF_SIZE];
+            while(remaining>0){
+                size_t chunk=remaining>BUF_SIZE?BUF_SIZE:(size_t)remaining;
+                size_t n=fread(file_buf,1,chunk,fp);
+                if(n==0){
+                    printf("读取文件失败\n");
+                    break;
+                }
+                if(send_all(sockfd,file_buf,n)!=0){
+                    printf("发送文件失败\n");
+                    break;
+                }
+                remaining-=n;
+            }
+            fclose(fp);            
+            if(remaining==0){
+                printf("文件上传成功\n");
+            }
+            continue;
+        }
+
         if(send(sockfd,write_buf,strlen(write_buf),0)<=0){
             perror("send");
             break;
