@@ -17,17 +17,61 @@ void *read_from_server(void *arg){
     int sockfd = *((int*)arg);
     char read_buf[BUF_SIZE];
     while(1){
-        int n=recv(sockfd,read_buf,sizeof(read_buf)-1,0);
-        fflush(stdout);
+        int n=recv_line(sockfd,read_buf,sizeof(read_buf));
         if(n < 0){
-            perror("recv");
-            continue;
-        }else if(n==0){
             printf("服务器已关闭连接\n");
             break;
+        }else if(n==0){
+            continue;
         }
-        read_buf[n]='\0';
+
+        if(strncmp(read_buf,"FILE ",5)==0){
+            char filename[256];
+            long long file_size;
+            if(sscanf(read_buf,"FILE %255s %lld",&filename,&file_size)!=2||file_size<0){
+                printf("下载文件头格式错误\n");
+                continue;
+            }
+            if(strchr(filename,'/')!=NULL){
+                printf("下载文件名非法\n");
+                continue;
+            }
+            char file_path[512];
+            int path_len=snprintf(file_path,sizeof(file_path),"downloads/%s",filename);
+            if(path_len<0||(size_t)path_len>=sizeof(file_path)){
+                printf("下载文件名过长\n");
+                continue;
+            }
+            FILE* fp = fopen(file_path,"wb");
+            if(fp==NULL){
+                perror("fopen");
+                continue;
+            }
+            long long remaining=file_size;
+            char file_buf[BUF_SIZE];
+            int download_ok=1;
+            while(remaining>0){
+                size_t chunk=remaining>BUF_SIZE?(size_t)BUF_SIZE:(size_t)remaining;
+                if(recv_all(sockfd,file_buf,chunk)!=0){
+                    printf("下载文件失败\n");
+                    download_ok=0;
+                    break;
+                }
+                if(fwrite(file_buf,1,chunk,fp)!=chunk){
+                    printf("保存下载文件失败\n");
+                    download_ok=0;
+                    break;
+                }
+                remaining-=chunk;
+            }
+            fclose(fp);
+            if(download_ok && remaining==0){
+                printf("下载文件完成: %s\n",file_path);
+            }
+        }
+
         fputs(read_buf,stdout);
+        fputc('\n',stdout);
         fflush(stdout);
     }
     shutdown(sockfd,SHUT_RDWR);
@@ -101,6 +145,25 @@ void *write_to_server(void *arg){
             if(remaining==0){
                 printf("文件上传成功\n");
             }
+            continue;
+        }
+        if (strncmp(write_buf,"/download ",10)==0){
+            char file_name[256];
+            if(sscanf(write_buf,"/download %255s",file_name)!=1){
+                printf("下载命令格式错误\n");
+                continue;
+            }
+            char request[BUF_SIZE];
+            int request_len=snprintf(request,sizeof(request),"DOWNLOAD %s\n",file_name);
+            if(request_len<0||(size_t)request_len>=sizeof(request)){
+                printf("下载请求过长\n");
+                continue;
+            }
+            if(send_all(sockfd,request,(size_t)request_len)!=0){
+                printf("发送下载请求失败\n");
+                break;
+            }
+            printf("已发送下载请求: %s\n",file_name);
             continue;
         }
 

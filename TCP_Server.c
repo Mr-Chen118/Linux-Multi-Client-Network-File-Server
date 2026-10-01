@@ -10,6 +10,7 @@
 #include<arpa/inet.h> 
 #include"common.h"
 #include"net_io.h"
+#include<sys/stat.h> 
 
 int sockfd_arr[MAX_CLIENT];
 int online_count=0;
@@ -177,7 +178,63 @@ void *handle_client(void *arg){
             printf("文件名: %s, 大小: %lld\n",filename,file_size);
             continue;
         }
-
+        if (strncmp(read_buf, "DOWNLOAD ", 9) == 0) {
+            char filename[256];
+            if (sscanf(read_buf, "DOWNLOAD %255s", filename) != 1) {
+                send_all(client_fd,"下载命令格式错误\n",sizeof("下载命令格式错误\n")- 1);
+                continue;
+            }
+            if(strchr(filename,'/')!=NULL){
+                send_all(client_fd,"文件名无效\n",sizeof("文件名无效\n")- 1);
+                continue;
+            }
+            char file_path[512];
+            int path_len=snprintf(file_path,sizeof(file_path),"server_files/%s",filename);
+            if (path_len<0 || (size_t)path_len>=sizeof(file_path)){
+                send_all(client_fd,"文件名过长\n",sizeof("文件名过长\n")- 1);
+                continue;
+            }
+            struct stat st;
+            if(stat(file_path,&st)!=0 || !S_ISREG(st.st_mode)){
+                send_all(client_fd,"文件不存在\n",sizeof("文件不存在\n")- 1);
+                continue;
+            }
+            FILE *fp = fopen(file_path,"rb");
+            if(fp==NULL){
+                printf("客户端%d打开文件失败\n",client_fd);
+                continue;
+            }
+            printf("客户端%d请求下载文件 %s(%lld 字节)\n",client_fd,filename,(long long)st.st_size);
+            char header[BUF_SIZE];
+            int header_len = snprintf(header,sizeof(header),"FILE %s %lld\n",filename,(long long)st.st_size);
+            if(header_len<0 || (size_t)header_len>=sizeof(header)){
+                printf("客户端%d下载文件头过长\n",client_fd);
+                fclose(fp);
+                continue;
+            }
+            if(send_all(client_fd,header,(size_t)header_len)!=0){
+                printf("客户端%d发送下载文件头失败\n",client_fd);
+                fclose(fp);
+                continue;
+            }
+            long long remaining = st.st_size;
+            char file_buf[BUF_SIZE];
+            while(remaining>0){
+                size_t chunk = remaining<BUF_SIZE?(size_t)remaining:(size_t)BUF_SIZE;
+                size_t n=fread(file_buf,1,chunk,fp);
+                if(n==0){
+                    printf("客户端%d读取下载文件失败\n",client_fd);
+                    break;
+                }
+                if(send_all(client_fd,file_buf,n)!=0){
+                    printf("客户端%d发送下载文件失败\n",client_fd);
+                    break;
+                }
+                remaining-=n;
+            }
+            fclose(fp);
+            continue;   
+        }
 
         printf("客户端%d:%s\n",client_fd,read_buf);
 
